@@ -1,0 +1,269 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Thailand Electricity Analytics Dashboard</title>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+    <div id="loading">Loading Data...</div>
+
+    <header>
+        <h1>⚡ Thailand Energy Dashboard</h1>
+        <div class="controls">
+            <select id="yearFilter" onchange="updateDashboard()">
+                </select>
+        </div>
+    </header>
+
+    <main class="dashboard-grid">
+        <div class="card stat-card">
+            <span class="stat-title">Total Provinces</span>
+            <span class="stat-value" id="totalProvinces">0</span>
+        </div>
+        <div class="card stat-card">
+            <span class="stat-title">Total Electricity Users</span>
+            <span class="stat-value" id="totalUsers">0</span>
+        </div>
+        <div class="card stat-card">
+            <span class="stat-title">Total Consumption (GWh)</span>
+            <span class="stat-value" id="totalConsumption">0</span>
+        </div>
+        <div class="card stat-card">
+            <span class="stat-title">Avg Consumption / User</span>
+            <span class="stat-value" id="avgConsumption">0</span>
+            <span class="stat-desc">kWh per user</span>
+        </div>
+
+        <div class="card col-span-2">
+            <h3>Top 5 Provinces by Consumption (kWh)</h3>
+            <div class="chart-container">
+                <canvas id="barChart"></canvas>
+            </div>
+        </div>
+
+        <div class="card col-span-2">
+            <h3>Usage Breakdown by Category</h3>
+            <div class="chart-container">
+                <canvas id="pieChart"></canvas>
+            </div>
+        </div>
+
+        <div class="card col-span-4">
+            <h3>Province Details</h3>
+            <div class="table-container">
+                <table id="dataTable">
+                    <thead>
+                        <tr>
+                            <th>Province</th>
+                            <th>Residential Users</th>
+                            <th>Business Users</th>
+                            <th>Total Consumption (kWh)</th>
+                            <th>Residential (kWh)</th>
+                            <th>Business (kWh)</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        </tbody>
+                </table>
+            </div>
+        </div>
+    </main>
+
+    <script>
+        // Global State
+        let rawUsers = [];
+        let rawUsages = [];
+        let mergedData = [];
+        let charts = {};
+
+        // 1. Fetch Data
+        async function loadData() {
+            try {
+                const [usersRes, usagesRes] = await Promise.all([
+                    fetch('electricity_users_en.json'),
+                    fetch('electricity_usages_en.json')
+                ]);
+
+                if (!usersRes.ok || !usagesRes.ok) throw new Error("Failed to load JSON files");
+
+                rawUsers = await usersRes.json();
+                const usageData = await usagesRes.json();
+                // Handle structure if wrapped in "Sheet1" or array
+                rawUsages = usageData.Sheet1 ? usageData.Sheet1 : usageData;
+
+                initDashboard();
+            } catch (error) {
+                document.getElementById('loading').innerHTML = 
+                    `Error loading files. Ensure .json files are in the same folder and you are running a local server.<br><br>Error: ${error.message}`;
+                document.getElementById('loading').style.color = 'red';
+            }
+        }
+
+        // 2. Initialize
+        function initDashboard() {
+            // Populate Year Filter
+            const years = [...new Set(rawUsers.map(d => d.year))].sort();
+            const yearSelect = document.getElementById('yearFilter');
+            yearSelect.innerHTML = ''; // Clear existing
+            
+            years.forEach(y => {
+                const opt = document.createElement('option');
+                opt.value = y;
+                opt.innerText = `Year: ${y}`;
+                yearSelect.appendChild(opt);
+            });
+            // Default to latest year
+            if(years.length > 0) yearSelect.value = years[years.length - 1];
+
+            document.getElementById('loading').style.display = 'none';
+            updateDashboard();
+        }
+
+        // 3. Process & Merge Data
+        function updateDashboard() {
+            const selectedYear = parseInt(document.getElementById('yearFilter').value);
+
+            // Filter by year
+            const usersYear = rawUsers.filter(d => d.year === selectedYear);
+            const usagesYear = rawUsages.filter(d => d.year === selectedYear);
+
+            // Merge datasets on province_code
+            mergedData = usersYear.map(user => {
+                const usage = usagesYear.find(u => u.province_code === user.province_code) || {};
+                
+                return {
+                    name: user.province_name,
+                    // Metrics: Users
+                    totalUsers: (user.residential_count || 0) + (user.small_business_count || 0) + (user.medium_business_count || 0) + (user.large_business_count || 0),
+                    resUsers: user.residential_count || 0,
+                    bizUsers: (user.small_business_count || 0) + (user.medium_business_count || 0) + (user.large_business_count || 0),
+                    
+                    // Metrics: Usage
+                    totalKwh: (usage.residential_kwh || 0) + (usage.small_business_kwh || 0) + (usage.medium_business_kwh || 0) + (usage.large_business_kwh || 0),
+                    resKwh: usage.residential_kwh || 0,
+                    bizKwh: (usage.small_business_kwh || 0) + (usage.medium_business_kwh || 0) + (usage.large_business_kwh || 0),
+                    
+                    // Specific Categories for Pie Chart
+                    catBreakdown: {
+                        "Residential": usage.residential_kwh || 0,
+                        "Small Biz": usage.small_business_kwh || 0,
+                        "Medium Biz": usage.medium_business_kwh || 0,
+                        "Large Biz": usage.large_business_kwh || 0,
+                        "EV Charging": usage.ev_charging_kwh || 0
+                    }
+                };
+            });
+
+            renderKPIs();
+            renderCharts();
+            renderTable();
+        }
+
+        // 4. Render KPIs
+        function renderKPIs() {
+            const totalProv = mergedData.length;
+            const totalUsers = mergedData.reduce((sum, d) => sum + d.totalUsers, 0);
+            const totalKwh = mergedData.reduce((sum, d) => sum + d.totalKwh, 0);
+            
+            // Formatters
+            const fmtNum = new Intl.NumberFormat('en-US').format;
+            const fmtCompact = new Intl.NumberFormat('en-US', { notation: "compact", maximumFractionDigits: 1 }).format;
+
+            document.getElementById('totalProvinces').innerText = totalProv;
+            document.getElementById('totalUsers').innerText = fmtCompact(totalUsers);
+            document.getElementById('totalConsumption').innerText = fmtCompact(totalKwh / 1000000); // GWh
+            
+            const avg = totalUsers > 0 ? (totalKwh / totalUsers).toFixed(0) : 0;
+            document.getElementById('avgConsumption').innerText = fmtNum(avg);
+        }
+
+        // 5. Render Charts
+        function renderCharts() {
+            // -- Bar Chart: Top 5 Provinces --
+            const sortedByUsage = [...mergedData].sort((a, b) => b.totalKwh - a.totalKwh).slice(0, 5);
+            
+            const barCtx = document.getElementById('barChart').getContext('2d');
+            if (charts.bar) charts.bar.destroy();
+
+            charts.bar = new Chart(barCtx, {
+                type: 'bar',
+                data: {
+                    labels: sortedByUsage.map(d => d.name),
+                    datasets: [{
+                        label: 'Total Consumption (kWh)',
+                        data: sortedByUsage.map(d => d.totalKwh),
+                        backgroundColor: '#3b82f6',
+                        borderRadius: 5
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    plugins: { legend: { display: false } }
+                }
+            });
+
+            // -- Pie Chart: Global Category Breakdown --
+            // Aggregate all provinces
+            const totals = { "Residential": 0, "Small Biz": 0, "Medium Biz": 0, "Large Biz": 0, "EV Charging": 0 };
+            mergedData.forEach(d => {
+                for (let k in totals) totals[k] += d.catBreakdown[k];
+            });
+
+            const pieCtx = document.getElementById('pieChart').getContext('2d');
+            if (charts.pie) charts.pie.destroy();
+
+            charts.pie = new Chart(pieCtx, {
+                type: 'doughnut',
+                data: {
+                    labels: Object.keys(totals),
+                    datasets: [{
+                        data: Object.values(totals),
+                        backgroundColor: [
+                            '#10b981', // Res
+                            '#f59e0b', // Small
+                            '#6366f1', // Med
+                            '#ef4444', // Large
+                            '#8b5cf6'  // EV
+                        ],
+                        borderWidth: 0
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    plugins: { legend: { position: 'right' } }
+                }
+            });
+        }
+
+        // 6. Render Table
+        function renderTable() {
+            const tbody = document.querySelector('#dataTable tbody');
+            tbody.innerHTML = '';
+            
+            // Show all (or filter if needed)
+            mergedData.forEach(row => {
+                const tr = document.createElement('tr');
+                tr.innerHTML = `
+                    <td>${row.name}</td>
+                    <td>${row.resUsers.toLocaleString()}</td>
+                    <td>${row.bizUsers.toLocaleString()}</td>
+                    <td><strong>${(row.totalKwh/1000000).toFixed(2)} M</strong></td>
+                    <td>${(row.resKwh/1000000).toFixed(2)} M</td>
+                    <td>${(row.bizKwh/1000000).toFixed(2)} M</td>
+                `;
+                tbody.appendChild(tr);
+            });
+        }
+
+        // Start
+        loadData();
+
+    </script>
+</body>
+</html>
